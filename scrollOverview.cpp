@@ -1265,10 +1265,6 @@ bool CScrollOverview::selectAndClose(const PHLWINDOW& window) {
 
     if (workspaceIdx >= images.size()) {
         closeOnWindow = window;
-        for (const auto& overview : scrollOverviews()) {
-            if (overview && overview.get() != this)
-                overview->close();
-        }
         close();
         return true;
     }
@@ -1276,10 +1272,9 @@ bool CScrollOverview::selectAndClose(const PHLWINDOW& window) {
     if (!selectOverviewWindow(window, workspaceIdx, true))
         return false;
 
-    for (const auto& overview : scrollOverviews()) {
-        if (overview && overview.get() != this)
-            overview->close();
-    }
+    // close() takes the other monitors' overviews down first and keeps the
+    // final word on focus. Closing them HERE made the first of them the outer
+    // close: this pick was focused, then that monitor's own guess stole it.
     close();
     return true;
 }
@@ -1825,10 +1820,6 @@ void CScrollOverview::performPrimaryClickAction() {
             return;
 
         HIT->overview->focusOverviewWorkspace(HIT->workspace, HIT->workspaceIdx);
-        for (const auto& overview : scrollOverviews()) {
-            if (overview && overview.get() != HIT->overview)
-                overview->close();
-        }
         HIT->overview->close();
         return;
     }
@@ -9582,6 +9573,11 @@ void CScrollOverview::close() {
     // -- runs last and has the final word. The static guard stops each of them
     // turning round and closing the rest again.
     static bool s_closingAll = false;
+    // Closed by another monitor's overview: that one holds the user's pick, so
+    // this one must not move focus on its way out. Each of them used to focus
+    // its own guess (the window it had selected), and the cursor followed the
+    // focus onto the wrong monitor (2026-10-19).
+    const bool  BYSTANDER    = s_closingAll;
     if (!s_closingAll) {
         s_closingAll      = true;
         const auto OTHERS = scrollOverviews(); // a copy: closing can unregister
@@ -9710,7 +9706,8 @@ void CScrollOverview::close() {
             if (FINALWORKSPACE != pMonitor->m_activeWorkspace)
                 pMonitor->changeWorkspace(FINALWORKSPACE, false, true, true);
 
-            Desktop::focusState()->fullWindowFocus(closeOnWindow.lock(), Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
+            if (!BYSTANDER)
+                Desktop::focusState()->fullWindowFocus(closeOnWindow.lock(), Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
 
             startedOn                = FINALWORKSPACE;
             viewportCurrentWorkspace = targetIdx;
@@ -9743,6 +9740,20 @@ void CScrollOverview::close() {
 
         if (SELECTEDWORKSPACE && SELECTEDWORKSPACE != pMonitor->m_activeWorkspace)
             pMonitor->changeWorkspace(SELECTEDWORKSPACE, false, true, true);
+
+        // A desktop picked off its windows: changeWorkspace(noFocus) left focus
+        // on the desktop just left -- or on another monitor -- and the keyboard
+        // handback then refocused it. Focus goes to the desktop picked: its last
+        // window, or this monitor with nothing focused when it is empty.
+        if (!BYSTANDER && focusSyncedFromWorkspaceID != WORKSPACE_INVALID && SELECTEDWORKSPACE && SELECTEDWORKSPACE == pMonitor->m_activeWorkspace) {
+            const auto LAST = getOverviewWindowToShow(SELECTEDWORKSPACE->getLastFocusedWindow());
+            if (LAST && LAST->m_workspace == SELECTEDWORKSPACE && shouldShowOverviewWindow(LAST))
+                Desktop::focusState()->fullWindowFocus(LAST, Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
+            else {
+                Desktop::focusState()->rawMonitorFocus(pMonitor.lock());
+                Desktop::focusState()->fullWindowFocus(nullptr, Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
+            }
+        }
     } else if (closeOnWindow == Desktop::focusState()->window() && closeOnWindow->m_workspace == pMonitor->m_activeWorkspace) {
         if (focusSyncedFromWorkspaceID != WORKSPACE_INVALID) {
             const auto ACTIVEIDX   = activeWorkspaceIndex();
@@ -9763,7 +9774,8 @@ void CScrollOverview::close() {
         if (closeOnWindow->m_workspace != pMonitor->m_activeWorkspace)
             pMonitor->changeWorkspace(closeOnWindow->m_workspace, false, true, true);
 
-        Desktop::focusState()->fullWindowFocus(closeOnWindow.lock(), Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
+        if (!BYSTANDER)
+            Desktop::focusState()->fullWindowFocus(closeOnWindow.lock(), Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
 
         const auto ACTIVEIDX = activeWorkspaceIndex();
         const auto FINALPITCH = getWorkspaceLogicalPitch(pMonitor.lock(), 1.F, layout);
